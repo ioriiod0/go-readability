@@ -5,10 +5,13 @@ import (
 	"code.google.com/p/go.net/html"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
+	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -25,7 +28,7 @@ var positiveRegexp = regexp.MustCompile(`(?i)article|body|content|entry|hentry|m
 
 var stripCommentRegexp = regexp.MustCompile(`(?s)\<\!\-{2}.+?-{2}\>`)
 
-var sentenceRegexp = regexp.MustCompile(`\.( |$)`)
+var sentenceRegexp = regexp.MustCompile(`[.。;；]( |$)`)
 
 var normalizeWhitespaceRegexp = regexp.MustCompile(`[\r\n\f]+`)
 
@@ -34,42 +37,67 @@ type candidate struct {
 	score     float32
 }
 
+type byScore []*candidate
+
+func (a byScore) Len() int           { return len(a) }
+func (a byScore) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byScore) Less(i, j int) bool { return a[i].score > a[j].score }
+
 func (c *candidate) Node() *html.Node {
 	return c.selection.Get(0)
 }
 
 type Document struct {
-	input         string
-	document      *goquery.Document
-	content       string
-	candidates    map[*html.Node]*candidate
-	bestCandidate *candidate
+	input      string
+	document   *goquery.Document
+	content    string
+	candidates map[*html.Node]*candidate
+	// bestCandidate    *candidate
+	sortedCandidates []*candidate
 
 	RemoveUnlikelyCandidates bool
 	WeightClasses            bool
 	CleanConditionally       bool
-	BestCandidateHasImage    bool
-	RetryLength              int
-	MinTextLength            int
-	RemoveEmptyNodes         bool
-	WhitelistTags            []string
+	// BestCandidateHasImage    bool
+
+	RetryLength      int
+	MinTextLength    int
+	ScoreThreshold   float32
+	RemoveEmptyNodes bool
+	WhitelistTags    []string
+	Url              *url.URL
+	// Images                   []string
 
 	logger *log.Logger
 }
 
-func NewDocument(s string) (*Document, error) {
+func NewDocument(s, _url string) (*Document, error) {
+	u, err := url.Parse(_url)
+	if err != nil {
+		return nil, err
+	}
+
 	d := &Document{
-		input:                    s,
-		WhitelistTags:            []string{"div", "p"},
+		input: s,
+		WhitelistTags: []string{
+			"div", "p", "a", "img",
+			"ul", "li", "ol", "h1",
+			"h2", "h3", "h4", "h5",
+			"h6", "dl", "dd", "strong",
+			"span", "br", "hr", "pre", "code",
+			"blockquote",
+		},
 		RemoveUnlikelyCandidates: true,
 		WeightClasses:            true,
 		CleanConditionally:       true,
-		RetryLength:              250,
-		MinTextLength:            25,
+		RetryLength:              200,
+		MinTextLength:            20,
 		RemoveEmptyNodes:         true,
 		logger:                   log.New(ioutil.Discard, "", log.LstdFlags),
+		Url:                      u,
 	}
-	err := d.initializeHtml(s)
+
+	err = d.initializeHtml(s)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +139,9 @@ func (d *Document) Content() string {
 		d.prepareCandidates()
 
 		article := d.getArticle()
+		// d.logger.Println(":::::::::article:::::::::", article)
 		articleText := d.sanitize(article)
+		// d.logger.Println("::::::::::article_text:::::::::", articleText)
 
 		length := len(strings.TrimSpace(articleText))
 		if length < d.RetryLength {
@@ -141,6 +171,22 @@ func (d *Document) Content() string {
 	return d.content
 }
 
+func (d *Document) Title() string {
+	return d.document.Find("title").Text()
+}
+
+func (d *Document) Text() string {
+	content := d.Content()
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+	if err != nil {
+		d.logger.Println("Unable to create document", err)
+		return ""
+	}
+
+	return doc.Text()
+}
+
 func (d *Document) prepareCandidates() {
 	// noscript might be valid, but probably not so we'll just remove it
 	d.document.Find("script, style,noscript").Each(func(i int, s *goquery.Selection) {
@@ -157,39 +203,68 @@ func (d *Document) prepareCandidates() {
 }
 
 func (d *Document) selectBestCandidate() {
-	var best *candidate
+	// var best *candidate
 
-	for _, c := range d.candidates {
-		if best == nil {
-			best = c
-		} else if best.score < c.score {
-			best = c
+	// for _, c := range d.candidates {
+	// 	if best == nil {
+	// 		best = c
+	// 	} else if best.score < c.score {
+	// 		best = c
+	// 	}
+	// }
+
+	d.sortedCandidates = make([]*candidate, 0, len(d.candidates))
+	if len(d.candidates) > 0 {
+		for _, c := range d.candidates {
+			d.sortedCandidates = append(d.sortedCandidates, c)
 		}
+
+		sort.Sort(byScore(d.sortedCandidates))
+		// best = d.sortedCandidates[0]
+		for _, c := range d.sortedCandidates {
+			d.Debug(fmt.Sprintf(":::::::::::::::candidate:%v:::::::::::", c.score), c.selection)
+		}
+	} else {
+		d.sortedCandidates = append(d.sortedCandidates, &candidate{d.document.Find("body"), 0})
 	}
 
-	if best == nil {
-		best = &candidate{d.document.Find("body"), 0}
-	}
+	// d.bestCandidate = best
 
-	d.bestCandidate = best
+}
+
+func (d *Document) cleanCandidates(s *goquery.Selection) {
+	s.Children().Each(func(i int, child *goquery.Selection) {
+		n := child.Get(0)
+		if c, ok := d.candidates[n]; ok {
+			// d.logger.Println("====================================",)
+			if c.score < d.ScoreThreshold {
+				d.Debug("CLEANED", child)
+				removeNodes(child)
+			}
+		} else {
+			d.cleanCandidates(child)
+		}
+	})
 }
 
 func (d *Document) getArticle() string {
 	output := bytes.NewBufferString("<div>")
+	d.ScoreThreshold = float32(math.Max(10, float64(d.sortedCandidates[0].score*.2)))
+	var f func(i int, s *goquery.Selection)
 
-	siblingScoreThreshold := float32(math.Max(10, float64(d.bestCandidate.score*.2)))
-
-	d.bestCandidate.selection.Siblings().Union(d.bestCandidate.selection).Each(func(i int, s *goquery.Selection) {
-		append := false
+	f = func(i int, s *goquery.Selection) {
 		n := s.Get(0)
+		append := false
 
-		if n == d.bestCandidate.Node() {
-			append = true
-		} else if c, ok := d.candidates[n]; ok && c.score >= siblingScoreThreshold {
-			append = true
-		}
-
-		if s.Is("p") {
+		if c, ok := d.candidates[n]; ok {
+			if c.score < d.ScoreThreshold {
+				d.Debug("ignored", s)
+				d.logger.Println("score:", c.score)
+			} else {
+				// d.cleanCandidates(s)
+				append = true
+			}
+		} else if s.Is("p") {
 			linkDensity := d.getLinkDensity(s)
 			content := s.Text()
 			contentLength := len(content)
@@ -202,19 +277,26 @@ func (d *Document) getArticle() string {
 		}
 
 		if append {
-			tag := "div"
-			if s.Is("p") {
-				tag = n.Data
-			}
-
-			html, _ := s.Html()
-			fmt.Fprintf(output, "<%s>%s</%s>", tag, html, tag)
+			appendDoc(output, s)
+		} else {
+			s.Children().Each(f)
 		}
-	})
+
+	}
+
+	if len(d.sortedCandidates) == 1 {
+		// d.bestCandidate.selection.Siblings().Union(d.bestCandidate.selection).Each(func(i int, s *goquery.Selection) {
+		// d.sortedCandidates[0].selection.Parent().Children().Each(f)
+		appendDoc(output, d.sortedCandidates[0].selection)
+	} else {
+		s := findLCA(d.document.Find("body"), d.sortedCandidates[0].selection, d.sortedCandidates[1].selection)
+		d.Debug("findLCA", s)
+		s.Children().Each(f)
+	}
 
 	output.Write([]byte("</div>"))
-
 	return output.String()
+
 }
 
 func (d *Document) removeUnlikelyCandidates() {
@@ -281,7 +363,7 @@ func (d *Document) scoreParagraphs(minimumTextLength int) {
 		}
 
 		contentScore := float32(1.0)
-		contentScore += float32(strings.Count(text, ",") + 1)
+		contentScore += float32(strings.Count(text, ",") + strings.Count(text, "，") + 1)
 		contentScore += float32(math.Min(float64(int(len(text)/100.0)), 3))
 
 		candidates[parentNode].score += contentScore
@@ -347,8 +429,10 @@ func (d *Document) scoreNode(s *goquery.Selection) *candidate {
 	contentScore := d.classWeight(s)
 	if s.Is("div") {
 		contentScore += 5
-	} else if s.Is("blockquote,form") {
-		contentScore = 3
+	} else if s.Is("blockquote") {
+		contentScore += 3
+	} else if s.Is("form") {
+		contentScore -= 3
 	} else if s.Is("th") {
 		contentScore -= 5
 	}
@@ -370,6 +454,12 @@ func (d *Document) sanitize(article string) string {
 		}
 	})
 
+	//fix img
+	s.Find("img").Each(func(i int, s *goquery.Selection) {
+		node := s.Get(0)
+		fixImageSrc(node.Attr, d.Url.Host)
+	})
+
 	s.Find("input,select,textarea,button,object,iframe,embed").Each(func(i int, s *goquery.Selection) {
 		removeNodes(s)
 	})
@@ -383,7 +473,21 @@ func (d *Document) sanitize(article string) string {
 		})
 	}
 
+	// d.Debug("before clean...", s)
+	// s.Find("*").Each(func(i int, s *goquery.Selection) {
+	// 	//.......
+	// 	node := s.Get(0)
+	// 	if c, ok := d.candidates[node]; ok && c.score < d.ScoreThreshold {
+	// 		d.Debug("ingored in sanitize", c.selection)
+	// 		removeNodes(c.selection)
+	// 		return
+	// 	}
+	// })
+	// d.Debug("after clean...", s)
+
+	// d.Debug("before clean...", s)
 	d.cleanConditionally(s, "table,ul,div")
+	// d.Debug("after clean...", s)
 
 	// we'll sanitize all elements using a whitelist
 	replaceWithWhitespace := map[string]bool{
@@ -427,7 +531,8 @@ func (d *Document) sanitize(article string) string {
 
 		// if element is in whitelist, delete all its attributes
 		if _, ok := whitelist[node.Data]; ok {
-			node.Attr = make([]html.Attribute, 0)
+			// node.Attr = make([]html.Attribute, 0)
+			node.Attr = cleanStyle(node.Attr)
 		} else {
 			if _, ok := replaceWithWhitespace[node.Data]; ok {
 				// just replace with a text node and add whitespace
@@ -448,7 +553,7 @@ func (d *Document) sanitize(article string) string {
 	})
 
 	if text == "" {
-		text, _ = doc.Html()
+		text, _ = doc.Find("body").Html()
 	}
 
 	return normalizeWhitespaceRegexp.ReplaceAllString(text, "\n")
@@ -475,7 +580,7 @@ func (d *Document) cleanConditionally(s *goquery.Selection, selector string) {
 		}
 
 		text := s.Text()
-		if strings.Count(text, ",") < 10 {
+		if strings.Count(text, ",")+strings.Count(text, "，") < 10 {
 			counts := map[string]int{
 				"p":     s.Find("p").Length(),
 				"img":   s.Find("img").Length(),
@@ -521,6 +626,13 @@ func (d *Document) cleanConditionally(s *goquery.Selection, selector string) {
 	})
 }
 
+func (d *Document) Debug(tag string, s *goquery.Selection) {
+	d.logger.Println("############################################", tag, "##########################################")
+	html, _ := s.Html()
+	d.logger.Println(html)
+	d.logger.Println("############################################", tag, "####################################################")
+}
+
 func getName(s *goquery.Selection) string {
 	class, _ := s.Attr("class")
 	id, _ := s.Attr("id")
@@ -551,4 +663,63 @@ func replaceNodeWithChildren(n *html.Node) {
 	}
 
 	parent.RemoveChild(n)
+}
+
+func cleanStyle(attrs []html.Attribute) []html.Attribute {
+	ret := make([]html.Attribute, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr.Key == "id" || attr.Key == "class" || attr.Key == "style" {
+			continue
+		}
+		ret = append(ret, attr)
+	}
+	return ret
+}
+
+func fixImageSrc(attrs []html.Attribute, host string) {
+	for _, attr := range attrs {
+		if attr.Key == "src" && !(strings.HasPrefix(attr.Val, "https://") || strings.HasPrefix(attr.Val, "http://")) {
+			attr.Val = fmt.Sprintf("%s/%s", host, attr.Val)
+			return
+		}
+	}
+}
+
+func appendDoc(w io.Writer, s *goquery.Selection) {
+	tag := "div"
+	if s.Is("p") {
+		tag = s.Get(0).Data
+	}
+
+	html, _ := s.Html()
+	fmt.Fprintf(w, "<%s>%s</%s>", tag, html, tag)
+}
+
+func findLCA(root, n, m *goquery.Selection) *goquery.Selection {
+	i := 0
+	j := 0
+
+	for c := n; c.Get(0) != root.Get(0); c = c.Parent() {
+		i++
+	}
+
+	for c := m; c.Get(0) != root.Get(0); c = c.Parent() {
+		j++
+	}
+
+	if i > j {
+		for k := 0; k < i-j; k++ {
+			n = n.Parent()
+		}
+	} else {
+		for k := 0; k < j-i; k++ {
+			m = m.Parent()
+		}
+	}
+
+	for ; n.Get(0) != m.Get(0); n, m = n.Parent(), m.Parent() {
+
+	}
+
+	return n
 }

@@ -6,7 +6,7 @@ go-readability is library for extracting the main content off of an HTML page. T
 Installation
 ------------
 
-`go get github.com/mauidude/go-readability`
+`go get github.com/ioriiod0/go-readability`
 
 Example
 -------
