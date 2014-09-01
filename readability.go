@@ -258,8 +258,8 @@ func (d *Document) getArticle() string {
 
 		if c, ok := d.candidates[n]; ok {
 			if c.score < d.ScoreThreshold {
-				d.Debug("ignored", s)
-				d.logger.Println("score:", c.score)
+				// d.Debug("ignored", s)
+				// d.logger.Println("score:", c.score)
 			} else {
 				// d.cleanCandidates(s)
 				append = true
@@ -336,6 +336,8 @@ func (d *Document) transformMisusedDivsIntoParagraphs() {
 func (d *Document) scoreParagraphs(minimumTextLength int) {
 	candidates := make(map[*html.Node]*candidate)
 
+	htmlNode := d.document.Find("html").Get(0)
+
 	d.document.Find("p,td").Each(func(i int, s *goquery.Selection) {
 		text := s.Text()
 
@@ -349,6 +351,7 @@ func (d *Document) scoreParagraphs(minimumTextLength int) {
 
 		grandparent := parent.Parent()
 		var grandparentNode *html.Node
+
 		if grandparent.Length() > 0 {
 			grandparentNode = grandparent.Get(0)
 		}
@@ -356,7 +359,7 @@ func (d *Document) scoreParagraphs(minimumTextLength int) {
 		if _, ok := candidates[parentNode]; !ok {
 			candidates[parentNode] = d.scoreNode(parent)
 		}
-		if grandparentNode != nil {
+		if grandparentNode != nil && grandparentNode != htmlNode {
 			if _, ok := candidates[grandparentNode]; !ok {
 				candidates[grandparentNode] = d.scoreNode(grandparent)
 			}
@@ -367,9 +370,10 @@ func (d *Document) scoreParagraphs(minimumTextLength int) {
 		contentScore += float32(math.Min(float64(int(len(text)/100.0)), 3))
 
 		candidates[parentNode].score += contentScore
-		if grandparentNode != nil {
+		if grandparentNode != nil && grandparentNode != htmlNode {
 			candidates[grandparentNode].score += contentScore / 2.0
 		}
+
 	})
 
 	// scale the final candidates score based on link density. Good content
