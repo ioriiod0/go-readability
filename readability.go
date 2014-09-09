@@ -461,7 +461,7 @@ func (d *Document) sanitize(article string) string {
 	//fix img
 	s.Find("img").Each(func(i int, s *goquery.Selection) {
 		node := s.Get(0)
-		fixImageSrc(node.Attr, d.Url.Host)
+		d.fixImageSrc(node.Attr, d.Url.Host)
 	})
 
 	s.Find("input,select,textarea,button,object,iframe,embed").Each(func(i int, s *goquery.Selection) {
@@ -680,10 +680,14 @@ func cleanStyle(attrs []html.Attribute) []html.Attribute {
 	return ret
 }
 
-func fixImageSrc(attrs []html.Attribute, host string) {
-	for _, attr := range attrs {
-		if attr.Key == "src" && !(strings.HasPrefix(attr.Val, "https://") || strings.HasPrefix(attr.Val, "http://")) {
-			attr.Val = fmt.Sprintf("%s/%s", host, attr.Val)
+func (d *Document) fixImageSrc(attrs []html.Attribute, host string) {
+	for i, attr := range attrs {
+		if attr.Key == "src" {
+			if strings.HasPrefix(attr.Val, "https://") || strings.HasPrefix(attr.Val, "http://") {
+				continue
+			}
+			attr.Val = fmt.Sprintf("http://%s%s", host, attr.Val)
+			attrs[i] = attr
 			return
 		}
 	}
