@@ -48,9 +48,11 @@ func (c *candidate) Node() *html.Node {
 }
 
 type Document struct {
-	input      string
+	input   string
+	density float64
+	content string
+
 	document   *goquery.Document
-	content    string
 	candidates map[*html.Node]*candidate
 	// bestCandidate    *candidate
 	sortedCandidates []*candidate
@@ -185,6 +187,11 @@ func (d *Document) Text() string {
 	}
 
 	return doc.Text()
+}
+
+func (d *Document) Density() float64 {
+	content := d.Content()
+	return float64(len(content)) / float64(len(d.input))
 }
 
 func (d *Document) prepareCandidates() {
