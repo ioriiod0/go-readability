@@ -2,7 +2,7 @@ package readability
 
 import (
 	"bytes"
-	"code.google.com/p/go.net/html"
+	"golang.org/x/net/html"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"io"
